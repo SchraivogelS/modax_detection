@@ -21,13 +21,7 @@ import errno
 import time
 import configparser
 
-# todo remove and copy relevant functions to repo
-from sys import path
-path.append('../../src')
-
-import utils.plot_util as putil
-import utils.io_util as ioutil
-
+import plot_utils as plot_utils
 import modax_funs as modax_funs
 
 
@@ -41,8 +35,6 @@ class CochlearMesh:
         self.smooth_mesh = False
         self.mask_cochlea = True
         self.min_len_verts = 5000
-        debug_base_dir = os.path.join(r'C:\project\ITIDE\03-Processing\CT', self.spec_name, 'data')
-        self.dir_matlab_mesh_in = os.path.join(debug_base_dir, 'matlab')
         self.plot_surf = False  # takes up to 1 min for big volumes
         self.verbose = False
         path_cfg = os.path.join(config_dir, 'modax_settings.ini')
@@ -65,11 +57,11 @@ class CochlearMesh:
         # load config
         config = configparser.ConfigParser()
         config.read(path_cfg)
-        self._iso_th = int(config['itide']['IsoThreshold'])
+        self._iso_th = int(config['modax']['IsoThreshold'])
         print(f'IsoThreshold: {self.iso_th}')
-        self._crop_radius = float(config['itide']['CropRadius'])
+        self._crop_radius = float(config['modax']['CropRadius'])
         print(f'CropRadius: {self.crop_radius}')
-        self._filter_size = int(config['itide']['FilterSize'])
+        self._filter_size = int(config['modax']['FilterSize'])
         print(f'FilterSize: {self.filter_size}')
 
     @property
@@ -261,7 +253,7 @@ class CochlearMesh:
                   f'vertices outside cochlear boundary sphere (keep {n_keep})')
 
         if self.plot_surf:
-            putil.iplot_mesh(verts_loc, faces_loc, landmarks=landmarks_loc,
+            plot_utils.iplot_mesh(verts_loc, faces_loc, landmarks=landmarks_loc,
                              title=f'Local mesh {self.spec_name}', alpha_surf=0.3,
                              orthographic=True)
 
@@ -272,7 +264,7 @@ class CochlearMesh:
         )
 
         if self.plot_surf:
-            putil.iplot_mesh(verts_fragments, faces_fragments,
+            plot_utils.iplot_mesh(verts_fragments, faces_fragments,
                              title=f'Mesh fragments {self.spec_name}', alpha_surf=0.3,
                              orthographic=True)
 
@@ -282,7 +274,7 @@ class CochlearMesh:
             faces_fragments,
             min_len=self.min_len_verts)
         if self.plot_surf:
-            putil.iplot_mesh(verts_cochlea_loc, faces_cochlea_loc,
+            plot_utils.iplot_mesh(verts_cochlea_loc, faces_cochlea_loc,
                              title=f'Extracted cochlea {self.spec_name}', alpha_surf=0.3,
                              orthographic=True)
         if self.verbose:

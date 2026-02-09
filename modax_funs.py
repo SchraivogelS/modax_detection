@@ -22,6 +22,7 @@ import time
 import logging
 
 import numpy as np
+import numpy.typing as npt
 import numpy.linalg as npl
 import scipy.sparse.linalg as sla
 import trimesh
@@ -33,15 +34,12 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from sklearn import preprocessing
 from typing import Tuple
+from copy import deepcopy
 
-import utils.matlab_util as mutil
-import utils.pydicom_util as pydcm
-import utils.plot_util as putil
-
-# todo remove wildcard import
-from modax.fit_ellipse import *
-from utils.io_util import *
-from utils.geometry_util import *
+import plot_utils as plot_utils
+import io_utils as io_utils
+import pydicom_utils as pydicom_utils
+import matlab_utils as matlab_utils
 
 
 def base_dir() -> str:
@@ -56,7 +54,7 @@ def init_specimen(spec_dir, spec_name):
     for key, val in specimen_data['landmarks'].items():
         # 3DSlicer works with RAS internally but stores data with LPS anatomical coordinate
         # system on disk -> convert landmarks to LPS as well
-        specimen_data['landmarks'][key] = np.array(pydcm.swap_ras_lps(val) if loaded_ras else val)
+        specimen_data['landmarks'][key] = np.array(pydicom_utils.swap_ras_lps(val) if loaded_ras else val)
 
     specimen_data['coord_sys'] = 'LPS'
     return specimen_data
@@ -187,7 +185,7 @@ def _marching_cubes(voxel_mat: np.ndarray, iso_th: int, *, spec_dir: str, spec_n
         print(f'Spacing {spacing}')
 
     if show_mesh:
-        putil.iplot_mesh(verts, faces, title=f'Raw marching cubes from Python, iso={iso_th}')
+        plot_utils.iplot_mesh(verts, faces, title=f'Raw marching cubes from Python, iso={iso_th}')
 
     return verts, faces, verts_transformed
 
@@ -220,7 +218,7 @@ def lps_to_ijk_matrix(origin: np.array, spacing: np.array) -> np.array:
 def load_landmarks(spec_dir, spec_name, read_all=False):
     lm_file_path = os.path.abspath(
         os.path.join(spec_dir, '_desc', str(spec_name + '-landmarks-ras.json')))
-    landmarks_ras = load_values_from_json(lm_file_path)
+    landmarks_ras = io_utils.load_values_from_json(lm_file_path)
     if not read_all:
         landmarks_ras = {key: np.array(value) for key, value in landmarks_ras['landmarks'].items()}
     return landmarks_ras
@@ -229,8 +227,8 @@ def load_landmarks(spec_dir, spec_name, read_all=False):
 def create_cochlear_sphere(spec_dir, spec_name, origin, spacing, vol_size):
     landmarks_ras = load_landmarks(spec_dir, spec_name)
     # fixme: why not working in lps?
-    a_lps = landmarks_ras['A']  # pydcm.swap_ras_lps(landmarks_ras['A'])
-    c_lps = landmarks_ras['C']  # pydcm.swap_ras_lps(landmarks_ras['C'])
+    a_lps = landmarks_ras['A']  # pydicom_utils.swap_ras_lps(landmarks_ras['A'])
+    c_lps = landmarks_ras['C']  # pydicom_utils.swap_ras_lps(landmarks_ras['C'])
 
     lps_to_ijk = lps_to_ijk_matrix(origin, spacing)
     a_ijk = np.round(transform_3D_point(a_lps, lps_to_ijk), 0)
@@ -403,7 +401,34 @@ def plot_voxel_distribution(voxel_mat: np.ndarray, iso_th: int, title: str):
     plt.show(block=True)
 
 
-def _resample_to_standard_orientation(*, spec_dir: str, spec_name: str, iso_th: int = None,
+def load_dicom(spec_dir: str, *, filter_size: int, verbose: bool = False):
+    dicom_dir = get_dicom_dir(spec_dir)
+    print(f'Load DICOM from {dicom_dir}')
+    check_for_low_n_dicoms(dicom_dir, 50)
+
+    # load DICOM files (in LPS if saved with 3DSlicer)
+    start_time = time.time()
+    ret = pydicom_utils.load_dcm_from_path(dicom_dir, filter_size=filter_size, verbose=True)
+
+    if verbose:
+        print('Dicom loading took {:.2f}s\n'.format(time.time() - start_time))
+    return ret
+
+
+def get_cochlear_sphere(*, mask_cochlea: bool, spec_dir: str, spec_name: str, dcm_offset: np.ndarray,
+                        dcm_spacing: np.ndarray, vol_size: np.ndarray, verbose: bool = False):
+    if mask_cochlea:
+        cochlear_sphere, center_vox = create_cochlear_sphere(spec_dir, spec_name, dcm_offset,
+                                                             dcm_spacing, vol_size)
+        if verbose:
+            print('Pre-cropping applied to voxel data.')
+    else:
+        cochlear_sphere = None
+        center_vox = None
+    return cochlear_sphere, center_vox
+
+
+def resample_to_standard_orientation(*, spec_dir: str, spec_name: str, iso_th: int = None,
                                       verbose: bool = False):
     import SimpleITK as sitk
 
@@ -414,9 +439,8 @@ def _resample_to_standard_orientation(*, spec_dir: str, spec_name: str, iso_th: 
         print(f"> Loading pre-reconstructed volume from: {recon_nii_path}")
         fixed_volume = sitk.ReadImage(recon_nii_path)
     else:
+        import vtk_utils as vtk_utils
         print("> Reconstructing...")
-        import utils.vtk_util as vtk_util
-
         # Load DICOM series into a SimpleITK image
         dicom_dir = get_dicom_dir(spec_dir)
         series_ids = sitk.ImageSeriesReader.GetGDCMSeriesIDs(dicom_dir)
@@ -437,7 +461,7 @@ def _resample_to_standard_orientation(*, spec_dir: str, spec_name: str, iso_th: 
 
         # Resample (Fix Orientation)
         start_time = time.time()
-        fixed_volume = vtk_util.resample_to_standard_orientation(sitk_volume)
+        fixed_volume = vtk_utils.resample_to_standard_orientation(sitk_volume)
         if verbose:
             print('Resampling took {:.2f}s\n'.format(time.time() - start_time))
 
@@ -473,33 +497,6 @@ def _resample_to_standard_orientation(*, spec_dir: str, spec_name: str, iso_th: 
     return voxel_mat, dcm_offset, dcm_spacing, vol_size
 
 
-def load_dicom(spec_dir: str, *, filter_size: int, verbose: bool = False):
-    dicom_dir = get_dicom_dir(spec_dir)
-    print(f'Load DICOM from {dicom_dir}')
-    check_for_low_n_dicoms(dicom_dir, 50)
-
-    # load DICOM files (in LPS if saved with 3DSlicer)
-    start_time = time.time()
-    ret = pydcm.load_DICOM_from_path(dicom_dir, filter_size=filter_size, verbose=True)
-
-    if verbose:
-        print('Dicom loading took {:.2f}s\n'.format(time.time() - start_time))
-    return ret
-
-
-def get_cochlear_sphere(*, mask_cochlea: bool, spec_dir: str, spec_name: str, dcm_offset: np.ndarray,
-                        dcm_spacing: np.ndarray, vol_size: np.ndarray, verbose: bool = False):
-    if mask_cochlea:
-        cochlear_sphere, center_vox = create_cochlear_sphere(spec_dir, spec_name, dcm_offset,
-                                                             dcm_spacing, vol_size)
-        if verbose:
-            print('Pre-cropping applied to voxel data.')
-    else:
-        cochlear_sphere = None
-        center_vox = None
-    return cochlear_sphere, center_vox
-
-
 def mesh_from_dicom(spec_dir, spec_name, iso_th: int = 1000, filter_size: int = 3,
                     mask_cochlea=False, show_mesh=False, return_raw_verts=False,
                     verbose: bool = False):
@@ -509,18 +506,18 @@ def mesh_from_dicom(spec_dir, spec_name, iso_th: int = 1000, filter_size: int = 
     img_or = np.array(patient_ds[0].ImageOrientationPatient, dtype=float)
     is_standard_axial = np.allclose(img_or, np.array([1, 0, 0, 0, 1, 0]))
     if not is_standard_axial:
-        voxel_mat, dcm_offset, dcm_spacing, vol_size = _resample_to_standard_orientation(spec_dir=spec_dir,
+        voxel_mat, dcm_offset, dcm_spacing, vol_size = resample_to_standard_orientation(spec_dir=spec_dir,
                                                                                          spec_name=spec_name,
                                                                                          iso_th=iso_th,
                                                                                          verbose=verbose)
     else:
         # standard orientation
-        dcm_offset = pydcm.get_DICOM_offset(patient_ds[0])
-        Nx, Ny, Nz = pydcm.get_vol_size(patient_ds)
+        dcm_offset = pydicom_utils.get_dcm_offset(patient_ds[0])
+        Nx, Ny, Nz = pydicom_utils.get_vol_size(patient_ds)
         vol_size = np.array([Nx, Ny, Nz])
-        dcm_spacing = pydcm.get_pixel_spacing(patient_ds)
+        dcm_spacing = pydicom_utils.get_pixel_spacing(patient_ds)
         start_time = time.time()
-        voxel_mat = pydcm.get_image_voxel_data(patient_ds)
+        voxel_mat = pydicom_utils.get_image_voxel_data(patient_ds)
         if verbose:
             print('Voxel data to RAM took {:.2f}s\n'.format(time.time() - start_time))
 
@@ -575,14 +572,14 @@ def get_verts_to_rm_dicom(verts_loc, landmarks_loc, crop_radius):
     plane_apex = (landmarks_loc['C'] - landmarks_loc['A'])
     plane_apex /= np.linalg.norm(plane_apex)
     plane_apex_rep = np.array([plane_apex] * n_rows_verts)
-    boundary_plane_apex = mutil.matlab_dot(plane_apex_rep, verts_loc, axis=1) < np.dot(plane_apex,
+    boundary_plane_apex = matlab_utils.matlab_dot(plane_apex_rep, verts_loc, axis=1) < np.dot(plane_apex,
                                                                                        landmarks_loc[
                                                                                            'A'] + 0.5)
     # Boundary plane base
     plane_base = landmarks_loc['A'] - landmarks_loc['C']
     plane_base /= np.linalg.norm(plane_base)
     plane_base_rep = np.array([plane_base] * n_rows_verts)
-    boundary_plane_base = mutil.matlab_dot(plane_base_rep, verts_loc, axis=1) < np.dot(plane_base,
+    boundary_plane_base = matlab_utils.matlab_dot(plane_base_rep, verts_loc, axis=1) < np.dot(plane_base,
                                                                                        landmarks_loc[
                                                                                            'C'])
 
@@ -599,7 +596,7 @@ def get_verts_to_rm_surf(verts_loc, landmarks_loc):
     plane_normal = (landmarks_loc['C'] - landmarks_loc['V'])
     plane_normal /= np.linalg.norm(plane_normal)
     plane_normal_rep = np.array([plane_normal] * n_rows_verts)
-    boundary_plane_base = mutil.matlab_dot(plane_normal_rep, verts_loc, axis=1) < np.dot(
+    boundary_plane_base = matlab_utils.matlab_dot(plane_normal_rep, verts_loc, axis=1) < np.dot(
         plane_normal,
         landmarks_loc['RW'])
     # Remove vertices outside boundaries
@@ -817,7 +814,7 @@ def remove_vertices_by_mask(verts: np.ndarray, faces: np.ndarray,
     # 1. Find the coordinates of vertices to remove.
     verts_to_rm_coords = verts[bool_rm_verts, :]
     # 2. Find the index of those coordinates in the unique list 'v'.
-    _, idx_rm_verts = mutil.matlab_ismember(verts_to_rm_coords, v, rows=True)
+    _, idx_rm_verts = matlab_utils.matlab_ismember(verts_to_rm_coords, v, rows=True)
 
     # Create the boolean mask for the unique vertex array 'v'
     logical_rm_unique = np.full(v.shape[0], False)
@@ -864,7 +861,7 @@ def remove_vertices_by_mask(verts: np.ndarray, faces: np.ndarray,
     tags_new = np.arange(0, len(v_new))
     # Check which vertices in the new list (0 to len(v_new)) are present in the new faces
 
-    referenced_verts_mask = mutil.matlab_ismember(tags_new, f_new_renumbered)
+    referenced_verts_mask = matlab_utils.matlab_ismember(tags_new, f_new_renumbered)
     unused_verts_mask = np.invert(referenced_verts_mask)
 
     # Recursive call to clean up isolated fragments
@@ -1007,7 +1004,7 @@ def init_extended_spiral_field(verts: np.array, normals: np.array, gamma_np: dic
     nx = space_ext['nx']
     ny = space_ext['ny']
     nz = space_ext['nz']
-    n_dot_p = ascol(mutil.matlab_dot(verts, normals, axis=1))
+    n_dot_p = ascol(matlab_utils.matlab_dot(verts, normals, axis=1))
 
     f_x = np.concatenate((-ascol((npl.norm(verts, axis=1)) ** 2), ze, ze), axis=1) + (verts * vx)
     f_y = np.concatenate((ze, -ascol((npl.norm(verts, axis=1)) ** 2), ze), axis=1) + (verts * vy)
@@ -1052,7 +1049,7 @@ def distance_extended_field_to_data(verts: np.array, normals: np.array, fit_tors
 def get_gamma(verts, normals, extended) -> np.array:
     # Parameter space - standard spiral field
     p_cross_n = np.cross(verts, normals)
-    n_dot_p = ascol(mutil.matlab_dot(verts, normals, axis=1))
+    n_dot_p = ascol(matlab_utils.matlab_dot(verts, normals, axis=1))
 
     # Kinematic motion space
     if extended:
@@ -1065,9 +1062,9 @@ def get_gamma(verts, normals, extended) -> np.array:
     return ret
 
 
-def init_mn_scale(max_verts: int) -> (np.array, np.array):
-    M_scale = ones((max_verts, 1))
-    N_scale = ones((max_verts, 1))
+def init_mn_scale(max_verts: int) -> (npt.NDarray, npt.NDarray):
+    M_scale = np.ones((max_verts, 1))
+    N_scale = np.ones((max_verts, 1))
     return M_scale, N_scale
 
 
@@ -1097,7 +1094,7 @@ def get_mn_scale(gamma, gamma_np, params, max_verts, z, w_p):
 
 def get_mn_matrices(gamma: np.array, gamma_np: np.array, max_verts: int, w_p: float,
                     M_scale: np.array = None, N_scale: np.array = None,
-                    M: np.array = 0, N: np.array = 0) -> (np.array, np.array):
+                    M: np.array = 0, N: np.array = 0) -> (npt.NDarray, npt.NDarray):
     def _outer(a):
         return np.outer(a.T, a)
 
@@ -1413,6 +1410,7 @@ def fitt_optnu(x, delta, p):
     return f
 
 
+# todo refactor
 def student_t_vectorized(x, nu=5, eps=1e-8, max_iter=500, verbose=False):
     """
     Fit a t-distribution using the ECME algorithm (Lui & Rubin, 1995)
@@ -1626,40 +1624,27 @@ def student_t_vectorized(x, nu=5, eps=1e-8, max_iter=500, verbose=False):
     return mean, S, nu, w.flatten()
 
 
-def compare_results_to_matlab(spec_name, kin_A, kin_Z):
-    kin_A_matlab = {
-        'I02a': [0.522806096680986, -0.807116589274900, 0.274292902916652],
-        'I02b': [-0.557114367235595, -0.738772583802516, 0.379260663978533],
-        'I03': [0.586675838274943, -0.801615442819785, 0.114996272188417],
-        'I05': [-0.633333809296599, -0.667823803989488, 0.391023851992266],
-        'I08': [-0.639110944889273, -0.689100556605813, 0.341581063597352],
-        'I38': [0.416646968973850, -0.905811870846562, -0.0768775511990012],
-        'I43': [-0.541187643048854, -0.829898235529106, 0.135590758080717],
-        'I44': [-0.517195716069934, -0.839075674921787, -0.168702706064412],
-        'SNF_F1': [-0.509005488244715, -0.859759424291127, -0.0415589374184357]
-    }
-
-    kin_Z_matlab = {
-        'I02a': [30.0231275085860, -82.7031314359936, 632.128018424096],
-        'I02b': [-38.3440425934378, -84.3063612510527, 634.218034190995],
-        'I03': [37.1899077448487, -131.178931404099, -2.87590261781617],
-        'I05': [-39.2157611413150, -84.1298072833371, -17.6546000833935],
-        'I08': [-38.6926699047382, -164.189751764726, 405.236583256064],
-        'I38': [37.0071603154898, -8.04622503213508, 1.27127356760424],
-        'I43': [-38.9508641211396, -17.7662900527465, -9.49451539381198],
-        'I44': [-36.2333000288773, 7.24282405594772, -6.55234080042511],
-        'SNF_F1': [-8.67820778668994, -87.5038964030964, -54.1677305409391]
-    }
-
-    if kin_A_matlab.keys() != kin_Z_matlab.keys():
-        logging.warning(
-            f'Missing keys for matlab data ({kin_A_matlab.keys(), kin_Z_matlab.keys()})')
-    elif spec_name not in kin_A_matlab.keys():
-        logging.warning(f"'{spec_name}' missing in matlab keys ({kin_A_matlab.keys()})")
+def transform_3D_point(point, hom_trans_mat) -> np.ndarray:
+    """
+    Transform point by homogeneous transformation matrix
+    @param point: 3D point
+    @param hom_trans_mat: (4x4) homogeneous transformation matrix
+    @return: Transformed point (float array)
+    """
+    point_proj = np.nan
+    point = np.asarray(point)
+    if (point.ndim != 1) or (point.shape[0] != 3):
+        logging.error(f'Point has invalid shape {point}')
+    elif not isinstance(hom_trans_mat, np.ndarray):
+        logging.error('Homogeneous transformation matrix needs to be ndarray')
+    elif (hom_trans_mat.ndim != 2) or (hom_trans_mat.shape[0] != hom_trans_mat.shape[1]) or (
+            hom_trans_mat.shape[0] != 4):
+        logging.error(f'Homogeneous transformation matrix has invalid shape {hom_trans_mat}')
     else:
-        kin_A_deviation = angle_between_3D_vectors(kin_A, kin_A_matlab[spec_name], unit='degree')
-        print('Compared to Matlab, rotational axis differs by an angle of {:.2f}°'.format(
-            kin_A_deviation))
-        v_zero_deviation = np.linalg.norm(kin_Z - kin_Z_matlab[spec_name])
-        print('Compared to Matlab, center of velocity zero differs by a distance of {:.2f}'.format(
-            v_zero_deviation))
+        point_hom = np.append(point, 1.0)
+        point_proj = np.dot(hom_trans_mat, point_hom)
+        # perspective division (ensure W=1)
+        point_proj /= point_proj[-1]
+        # remove scaling factor
+        point_proj = np.asarray(point_proj[:3])
+    return point_proj

@@ -24,12 +24,10 @@ import numpy as np
 import locale
 locale.setlocale(locale.LC_ALL, '')  # Format of number printing {<number>:n}, Use '' for auto
 
-from collections import defaultdict
-
 import modax_funs as modax_funs
-import utils.plot_util as putil
-import utils.io_util as ioutil
-import utils.pydicom_util as pyutil
+import pydicom_utils as pydicom_utils
+import io_utils as io_utils
+import plot_utils as plot_utils
 
 
 class ModiolarAxis:
@@ -44,9 +42,9 @@ class ModiolarAxis:
         # load config
         config = configparser.ConfigParser()
         config.read(path_cfg)
-        self.spec_name = str(config['itide']['SinglePatient'])  # specimen for modiolar axis detection
+        self.spec_name = str(config['modax']['SinglePatient'])  # specimen for modiolar axis detection
         print(f'SinglePatient: {self.spec_name}')
-        self.w_p = float(config['itide']['w_p'])
+        self.w_p = float(config['modax']['w_p'])
         print(f'w_p: {self.w_p}')
         self.base_dir = modax_funs.base_dir()
         # Other members
@@ -112,7 +110,7 @@ class ModiolarAxis:
         self._spec_out_dir = self.get_spec_out_dir()
 
     def save_fit(self):
-        fit_result = defaultdict(dict)
+        fit_result = dict()
 
         fit_result['id'] = self.spec_name
         fit_result['side'] = modax_funs.side_to_str(self.Cochlea.side)
@@ -121,11 +119,13 @@ class ModiolarAxis:
         fit_result['filter_size'] = self.Cochlea.filter_size
         fit_result['coord_sys'] = 'RAS'  # store fit in RAS anatomical coordinate system
 
+        fit_result['landmarks'] = dict()
         fit_result['landmarks']['RW'] = self.Cochlea.specimen_data['landmarks']['RW']
         fit_result['landmarks']['C'] = self.Cochlea.specimen_data['landmarks']['C']
         fit_result['landmarks']['A'] = self.Cochlea.specimen_data['landmarks']['A']
         fit_result['landmarks']['OW'] = self.Cochlea.specimen_data['landmarks']['OW']
 
+        fit_result['fit'] = dict()
         fit_result['fit']['P0'] = self.kin_z_world.T
         fit_result['fit']['AX'] = self.kin_A_world.T
         fit_result['fit']['normalizer'] = self.Cochlea.normalizer
@@ -137,23 +137,25 @@ class ModiolarAxis:
         fit_result['fit']['w_p'] = self.w_p
         fit_result['fit']['min_len_verts'] = self.Cochlea.min_len_verts
 
+        fit_result['mesh'] = dict()
         fit_result['mesh']['vertices_local'] = self.Cochlea.verts_loc
         fit_result['mesh']['faces'] = self.Cochlea.faces_loc
 
         # use correct coordinates in anatomical system
         if self.Cochlea.specimen_data['coord_sys'] == 'LPS':
             for key, val in fit_result['landmarks'].items():
-                fit_result['landmarks'][key] = pyutil.swap_ras_lps(val)
-            fit_result['fit']['P0'] = pyutil.swap_ras_lps(fit_result['fit']['P0'])
-            fit_result['fit']['AX'] = pyutil.swap_ras_lps(fit_result['fit']['AX'])
-            fit_result['mesh']['vertices_local'] = pyutil.swap_ras_lps(
-                fit_result['mesh']['vertices_local'])
+                fit_result['landmarks'][key] = pydicom_utils.swap_ras_lps(val)
+            fit_result['fit']['P0'] = pydicom_utils.swap_ras_lps(fit_result['fit']['P0'])
+            fit_result['fit']['AX'] = pydicom_utils.swap_ras_lps(fit_result['fit']['AX'])
+            fit_result['mesh']['vertices_local'] = pydicom_utils.swap_ras_lps(
+                fit_result['mesh']['vertices_local']
+            )
 
         # Output directory
         if not os.path.exists(self.spec_out_dir):
             os.mkdir(self.spec_out_dir)
 
-        ioutil.save_np_values_to_json(fit_result,
+        io_utils.save_np_values_to_json(fit_result,
                                       os.path.join(self.spec_out_dir,
                                                    self.Cochlea.spec_name + '-fit-modax.json'))
 
@@ -163,16 +165,16 @@ class ModiolarAxis:
 
         # --- matplotlib
         # mesh_normalized = trimesh.Trimesh(vertices=vnorm, faces=fnorm)
-        # ax = putil.pyplot_mesh(vnorm, fnorm, face_normals=mesh_normalized.face_normals,
+        # ax = plot_utils.pyplot_mesh(vnorm, fnorm, face_normals=mesh_normalized.face_normals,
         #                        alpha_surf=0.8, equal_axis_limit=1)
         # arrow_len = 1 / 3 * (np.max(vnorm[:, 2]) - np.min(vnorm[:, 2]))
-        # putil.plot_rotax_on_axes(kin_A, center_v_zero, ax, arrow_len=arrow_len, block=True)
+        # plot_utils.plot_rotax_on_axes(kin_A, center_v_zero, ax, arrow_len=arrow_len, block=True)
 
         # --- plotly
         title = f'{self.spec_name}_P0{self.kin_z_world}_AX{self.kin_A_world}'
-        fig = putil.iplot_mesh(vnorm, fnorm, orthographic=True, equal_axis_limit=1,
+        fig = plot_utils.iplot_mesh(vnorm, fnorm, orthographic=True, equal_axis_limit=1,
                                title=title, show=False)
-        fig = putil.iplot_rotax_on_fig(kin_A, center_v_zero, fig=fig)
+        fig = plot_utils.iplot_rotax_on_fig(kin_A, center_v_zero, fig=fig)
 
         if self.save_fit_to_file:
             fig_name = f'{self.spec_name}_axis_fitting'
