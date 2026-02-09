@@ -21,8 +21,8 @@ import errno
 import time
 import configparser
 
-import plot_utils as plot_utils
-import modax_funs as modax_funs
+import utils.plot_utils as plot_utils
+import utils.modax_utils as modax_utils
 
 
 class CochlearMesh:
@@ -181,9 +181,9 @@ class CochlearMesh:
         self.init_mesh()
 
     def init_specimen(self):
-        self._specimen_data = modax_funs.init_specimen(self.spec_dir, self.spec_name)
+        self._specimen_data = modax_utils.init_specimen(self.spec_dir, self.spec_name)
         self._translation, self._rot_mat, self._coord_sys, \
-            self._side = modax_funs.get_local_coord_sys(self.specimen_data)
+            self._side = modax_utils.get_local_coord_sys(self.specimen_data)
 
     def init_mesh(self):
         self._labyrinth_loc, \
@@ -196,28 +196,28 @@ class CochlearMesh:
         self.verts_normalized, \
             self.faces_normalized, \
             self.centralizer, \
-            self.normalizer = modax_funs.normalize_mesh(self.verts_loc, self.faces_loc)
-        self.vertex_normals = modax_funs.vertex_normals_from_mesh(self.verts_normalized,
+            self.normalizer = modax_utils.normalize_mesh(self.verts_loc, self.faces_loc)
+        self.vertex_normals = modax_utils.vertex_normals_from_mesh(self.verts_normalized,
                                                        self.faces_normalized)
 
     def _extract_cochlea_polygon(self, specimen_data, translation, rot_mat, smooth_mesh=False):
         start_time = time.time()
 
         if self.load_dicom:
-            verts_transformed, faces_raw = modax_funs.mesh_from_dicom(
+            verts_transformed, faces_raw = modax_utils.mesh_from_dicom(
                 self.spec_dir, self.spec_name, self.iso_th,
                 filter_size=self.filter_size,
                 mask_cochlea=self.mask_cochlea, show_mesh=self.plot_surf,
                 verbose=self.verbose
             )
         else:
-            verts_transformed, faces_raw = modax_funs.mesh_from_surf(specimen_data, self.spec_data_dir,
+            verts_transformed, faces_raw = modax_utils.mesh_from_surf(specimen_data, self.spec_data_dir,
                                                           self.spec_name)
 
-        modax_funs.update_mesh_data(specimen_data, verts_transformed, faces_raw)
+        modax_utils.update_mesh_data(specimen_data, verts_transformed, faces_raw)
 
         # Transform to local coordinate system
-        labyrinth_loc = modax_funs.transform_labyrinth(specimen_data, translation, rot_mat)
+        labyrinth_loc = modax_utils.transform_labyrinth(specimen_data, translation, rot_mat)
         landmarks_loc = labyrinth_loc['landmarks'].copy()
         verts_loc = labyrinth_loc['vertices'].copy()
         faces_loc = labyrinth_loc['faces'].copy()
@@ -226,7 +226,7 @@ class CochlearMesh:
         verts_cochlea_loc, faces_cochlea_loc = self._extract_cochlea(verts_loc, faces_loc,
                                                                      landmarks_loc)
         if smooth_mesh:
-            verts_cochlea_loc, faces_cochlea_loc = modax_funs.smooth_laplacian(verts_cochlea_loc,
+            verts_cochlea_loc, faces_cochlea_loc = modax_utils.smooth_laplacian(verts_cochlea_loc,
                                                                     faces_cochlea_loc)
 
         labyrinth_loc['vertices_processed_unnormalized'] = verts_cochlea_loc.copy()
@@ -241,9 +241,9 @@ class CochlearMesh:
             print('Extract Cochlea ...')
 
         if self.load_dicom:
-            bool_rm_verts = modax_funs.get_verts_to_rm_dicom(verts_loc, landmarks_loc, self.crop_radius)
+            bool_rm_verts = modax_utils.get_verts_to_rm_dicom(verts_loc, landmarks_loc, self.crop_radius)
         else:
-            bool_rm_verts = modax_funs.get_verts_to_rm_surf(verts_loc, landmarks_loc)
+            bool_rm_verts = modax_utils.get_verts_to_rm_surf(verts_loc, landmarks_loc)
 
         n_keep = len(bool_rm_verts) - np.sum(bool_rm_verts)
         if n_keep == 0:
@@ -257,7 +257,7 @@ class CochlearMesh:
                              title=f'Local mesh {self.spec_name}', alpha_surf=0.3,
                              orthographic=True)
 
-        verts_fragments, faces_fragments = modax_funs.remove_vertices_by_mask(
+        verts_fragments, faces_fragments = modax_utils.remove_vertices_by_mask(
             verts=verts_loc,
             faces=faces_loc,
             bool_rm_verts=bool_rm_verts
@@ -269,7 +269,7 @@ class CochlearMesh:
                              orthographic=True)
 
         # Select Cochlea from Fragments
-        verts_cochlea_loc, faces_cochlea_loc = modax_funs.select_cochlea_from_fragments(
+        verts_cochlea_loc, faces_cochlea_loc = modax_utils.select_cochlea_from_fragments(
             verts_fragments,
             faces_fragments,
             min_len=self.min_len_verts)

@@ -36,10 +36,10 @@ from sklearn import preprocessing
 from typing import Tuple
 from copy import deepcopy
 
-import plot_utils as plot_utils
-import io_utils as io_utils
-import pydicom_utils as pydicom_utils
-import matlab_utils as matlab_utils
+import utils.plot_utils as plot_utils
+import utils.io_utils as io_utils
+import utils.pydicom_utils as pydicom_utils
+import utils.matlab_utils as matlab_utils
 
 
 def base_dir() -> str:

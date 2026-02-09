@@ -24,10 +24,10 @@ import numpy as np
 import locale
 locale.setlocale(locale.LC_ALL, '')  # Format of number printing {<number>:n}, Use '' for auto
 
-import modax_funs as modax_funs
-import pydicom_utils as pydicom_utils
-import io_utils as io_utils
-import plot_utils as plot_utils
+import utils.modax_utils as modax_utils
+import utils.pydicom_utils as pydicom_utils
+import utils.io_utils as io_utils
+import utils.plot_utils as plot_utils
 
 
 class ModiolarAxis:
@@ -46,7 +46,7 @@ class ModiolarAxis:
         print(f'SinglePatient: {self.spec_name}')
         self.w_p = float(config['modax']['w_p'])
         print(f'w_p: {self.w_p}')
-        self.base_dir = modax_funs.base_dir()
+        self.base_dir = modax_utils.base_dir()
         # Other members
         self.Cochlea = CochlearMesh.CochlearMesh(self.base_dir, self.spec_name)
         self._initialized = False
@@ -113,7 +113,7 @@ class ModiolarAxis:
         fit_result = dict()
 
         fit_result['id'] = self.spec_name
-        fit_result['side'] = modax_funs.side_to_str(self.Cochlea.side)
+        fit_result['side'] = modax_utils.side_to_str(self.Cochlea.side)
         fit_result['iso_th'] = self.Cochlea.iso_th
         fit_result['crop_radius'] = self.Cochlea.crop_radius
         fit_result['filter_size'] = self.Cochlea.filter_size
@@ -183,7 +183,7 @@ class ModiolarAxis:
             print(f'Wrote figure to {fig_path}')
 
     def get_kin_z(self):
-        kin_z = modax_funs.get_center_vzero(self.fit_c, self.fit_c_bar, self.fit_gamma)
+        kin_z = modax_utils.get_center_vzero(self.fit_c, self.fit_c_bar, self.fit_gamma)
         kin_z_unnormalized = kin_z * self.Cochlea.normalizer + self.Cochlea.centralizer
         kin_z_world = kin_z_unnormalized @ self.Cochlea.rot_mat + self.Cochlea.coord_sys[
             'Origin']  # back transformation from local
@@ -193,7 +193,7 @@ class ModiolarAxis:
 
     def get_kin_A(self):
         # Note: Angle between 3D vectors: atan2d(norm(cross(a, b)), dot(a, b))
-        kin_A, kin_A_bar = modax_funs.get_rotation_axis(self.fit_c, self.fit_c_bar, self.fit_gamma)
+        kin_A, kin_A_bar = modax_utils.get_rotation_axis(self.fit_c, self.fit_c_bar, self.fit_gamma)
         kin_A_world = kin_A @ self.Cochlea.rot_mat  # back transformation from local
         kin_A_world /= np.linalg.norm(kin_A_world)
         if self.verbose:
@@ -210,7 +210,7 @@ class ModiolarAxis:
 
         self._fit_c, \
         self._fit_c_bar, \
-        self._fit_gamma = modax_funs.fit_cochlear_shape(self.Cochlea.verts_normalized,
+        self._fit_gamma = modax_utils.fit_cochlear_shape(self.Cochlea.verts_normalized,
                                              self.Cochlea.vertex_normals,
                                              self.max_iter, self.w_p, verbose=self.verbose)
 
