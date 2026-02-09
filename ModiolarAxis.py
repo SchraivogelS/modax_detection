@@ -20,10 +20,13 @@ import os
 import sys
 import logging
 import configparser
+import numpy as np
 import locale
 locale.setlocale(locale.LC_ALL, '')  # Format of number printing {<number>:n}, Use '' for auto
 
-from modax.modax_funs import *
+from collections import defaultdict
+
+import modax_funs as modax_funs
 import utils.plot_util as putil
 import utils.io_util as ioutil
 import utils.pydicom_util as pyutil
@@ -35,20 +38,17 @@ class ModiolarAxis:
         # Adjustable parameters
         self.max_iter = 15
         self.plot_resulting_fit = True
-        self.compare_results = False
         self.save_fit_to_file = False
         self.verbose = True
         path_cfg = r'modax_settings.ini'
         # load config
         config = configparser.ConfigParser()
         config.read(path_cfg)
-        self.spec_name = config['itide']['SinglePatient']  # specimen for modiolar axis detection
+        self.spec_name = str(config['itide']['SinglePatient'])  # specimen for modiolar axis detection
         print(f'SinglePatient: {self.spec_name}')
         self.w_p = float(config['itide']['w_p'])
         print(f'w_p: {self.w_p}')
-        study = config['itide']['Study']
-        print(f'Study: {study}')
-        self.base_dir = base_dir_for(study)
+        self.base_dir = modax_funs.base_dir()
         # Other members
         self.Cochlea = CochlearMesh.CochlearMesh(self.base_dir, self.spec_name)
         self._initialized = False
@@ -100,11 +100,11 @@ class ModiolarAxis:
                 self.Cochlea.filter_size != 3:
             logging.warning('Parameters differ from recommended defaults')
 
-    def get_spec_out_dir(self):
+    def get_spec_out_dir(self) -> str:
         if not self.initialized:
             raise ValueError('Missing initialization')
         spec_out_dir = os.path.join(self.Cochlea.base_dir, self.Cochlea.spec_name, '_desc')
-        return spec_out_dir
+        return str(spec_out_dir)
 
     def init_cochlea(self):
         self.Cochlea.init()
@@ -115,12 +115,11 @@ class ModiolarAxis:
         fit_result = defaultdict(dict)
 
         fit_result['id'] = self.spec_name
-        fit_result['side'] = side_to_str(self.Cochlea.side)
+        fit_result['side'] = modax_funs.side_to_str(self.Cochlea.side)
         fit_result['iso_th'] = self.Cochlea.iso_th
         fit_result['crop_radius'] = self.Cochlea.crop_radius
         fit_result['filter_size'] = self.Cochlea.filter_size
         fit_result['coord_sys'] = 'RAS'  # store fit in RAS anatomical coordinate system
-        fit_result['mesh_from_matlab'] = self.Cochlea.mesh_from_matlab
 
         fit_result['landmarks']['RW'] = self.Cochlea.specimen_data['landmarks']['RW']
         fit_result['landmarks']['C'] = self.Cochlea.specimen_data['landmarks']['C']
@@ -182,7 +181,7 @@ class ModiolarAxis:
             print(f'Wrote figure to {fig_path}')
 
     def get_kin_z(self):
-        kin_z = get_center_vzero(self.fit_c, self.fit_c_bar, self.fit_gamma)
+        kin_z = modax_funs.get_center_vzero(self.fit_c, self.fit_c_bar, self.fit_gamma)
         kin_z_unnormalized = kin_z * self.Cochlea.normalizer + self.Cochlea.centralizer
         kin_z_world = kin_z_unnormalized @ self.Cochlea.rot_mat + self.Cochlea.coord_sys[
             'Origin']  # back transformation from local
@@ -192,7 +191,7 @@ class ModiolarAxis:
 
     def get_kin_A(self):
         # Note: Angle between 3D vectors: atan2d(norm(cross(a, b)), dot(a, b))
-        kin_A, kin_A_bar = get_rotation_axis(self.fit_c, self.fit_c_bar, self.fit_gamma)
+        kin_A, kin_A_bar = modax_funs.get_rotation_axis(self.fit_c, self.fit_c_bar, self.fit_gamma)
         kin_A_world = kin_A @ self.Cochlea.rot_mat  # back transformation from local
         kin_A_world /= np.linalg.norm(kin_A_world)
         if self.verbose:
@@ -209,7 +208,7 @@ class ModiolarAxis:
 
         self._fit_c, \
         self._fit_c_bar, \
-        self._fit_gamma = fit_cochlear_shape(self.Cochlea.verts_normalized,
+        self._fit_gamma = modax_funs.fit_cochlear_shape(self.Cochlea.verts_normalized,
                                              self.Cochlea.vertex_normals,
                                              self.max_iter, self.w_p, verbose=self.verbose)
 
@@ -222,42 +221,8 @@ class ModiolarAxis:
         if self.verbose:
             print(f'Done for specimen {self.spec_name}')
 
-        if self.compare_results:
-            compare_results_to_matlab(self.Cochlea.spec_name, self.kin_A_world, self.kin_z_world)
-
         if self.plot_resulting_fit:
             self.plot_fit(kin_A, kin_z)
-
-    # TODO: Fails for several (DICOM) subjects
-    def generate_sample_curve(self):
-        fit = ioutil.load_values_from_json(
-            os.path.join(self.spec_out_dir, self.Cochlea.spec_name + '-fit-modax.json'))
-        fit = fit['fit']
-
-        try:
-            # Slice polarly
-            generator = generate_sample_curve(self.Cochlea.labyrinth_loc, fit,
-                                              self.Cochlea.normalizer, self.Cochlea.centralizer)
-            self._generator = generator
-            save_as_csv(generator, self.spec_out_dir, self.Cochlea.spec_name + '-generator')
-        except Exception as err:
-            logging.error(f'Caught exception while generating sample curve:\n{err}')
-
-    def plot_sample_curve(self):
-        no_torsion = np.array([[0, 0, 0]])
-        fit = ioutil.load_values_from_json(
-            os.path.join(self.spec_out_dir, self.Cochlea.spec_name + '-fit-modax.json'))
-        fit = fit['fit']
-        curve, full_curve, curvature, torsion, arc_length = generate_shape(no_torsion,
-                                                                           fit['fit_c'],
-                                                                           fit['fit_c_bar'],
-                                                                           fit['fit_gamma'],
-                                                                           self.generator,
-                                                                           fit['P0'],
-                                                                           fit['normalizer'],
-                                                                           fit['centralizer'],
-                                                                           fit['AX'])
-        return
 
 
 if __name__ == "__main__":
@@ -266,6 +231,4 @@ if __name__ == "__main__":
     Modax.fit_axis()
     if Modax.save_fit_to_file:
         Modax.save_fit()
-    # Modax.generate_sample_curve()
-    # Modax.plot_sample_curve()
     sys.exit(0)

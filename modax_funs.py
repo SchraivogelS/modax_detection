@@ -25,38 +25,28 @@ import numpy as np
 import numpy.linalg as npl
 import scipy.sparse.linalg as sla
 import trimesh
-import mcubes
 import networkx as nx
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
 from collections import defaultdict
-from scipy.sparse.linalg import spsolve
-from scipy.sparse import csc_matrix
 from sklearn import preprocessing
-from skimage.measure import marching_cubes
 from typing import Tuple
 
 import utils.matlab_util as mutil
 import utils.pydicom_util as pydcm
 import utils.plot_util as putil
 
+# todo remove wildcard import
 from modax.fit_ellipse import *
 from utils.io_util import *
 from utils.geometry_util import *
 
 
-def base_dir_for(study: str) -> str:
-    base_dir = r'C:\project\ITIDE\03-Processing'
-    if study == 'itide':
-        pass
-    elif study == 'pathos':
-        base_dir = os.path.join(base_dir, 'PATHOS')
-    else:
-        raise ValueError(f'Unknown study {study}')
-    base_dir = os.path.join(base_dir, 'CT')
-    return base_dir
+def base_dir() -> str:
+    ret = 'data'
+    return ret
 
 
 def init_specimen(spec_dir, spec_name):
@@ -144,16 +134,11 @@ def smooth_laplacian(verts, faces):
     return verts, faces
 
 
-def mcubes_lookup(voxel_mat, iso_th, smooth=False):
-    verts, faces = mcubes.marching_cubes(voxel_mat, iso_th)
-    if smooth:
-        verts, faces = smooth_laplacian(verts, faces)
-    return verts, faces
-
-
 def skimage_marching_cubes(voxel_mat: np.ndarray, iso_level: int, *,
                            mask: np.ndarray = None, spacing: tuple = None, smooth: bool = False,
                            verbose: bool = True):
+    from skimage.measure import marching_cubes
+
     verts, faces, _, _ = marching_cubes(voxel_mat, level=iso_level, method='lewiner', mask=mask, spacing=spacing)
     if verts.size == 0:
         if verbose:
@@ -188,21 +173,10 @@ def _marching_cubes(voxel_mat: np.ndarray, iso_th: int, *, spec_dir: str, spec_n
         print('Marching cubes to create cochlear mesh ...')
     time_start = time.time()
 
-    # a) skimage mesh
+    # skimage mesh
     verts, faces = skimage_marching_cubes(voxel_mat=voxel_mat, iso_level=iso_th, mask=cochlear_sphere,
                                           spacing=tuple(spacing), smooth=smooth)
     verts_transformed = verts + offset  # verts already scaled correctly by skimage using spacing
-
-    # b) mcubes mesh
-    # volume_for_mc = voxel_mat.copy()
-    # volume_for_mc[~cochlear_sphere] = -10e3
-    # verts, faces = mcubes_lookup(volume_for_mc, iso_th)
-    # verts_transformed = transform_verts(verts, dcm_offset, dcm_spacing)
-
-    # c) vtk_mesh
-    # from utils.vtk_util import vtk_mesh_from_dicom
-    # verts, faces = vtk_mesh_from_dicom(voxel_mat, iso_th, smooth=False)
-    # verts_transformed = transform_verts(verts, dcm_offset, dcm_spacing)
 
     if len(verts_transformed) == 0:
         raise ValueError(f'No surface at given iso level')
@@ -904,7 +878,6 @@ def remove_vertices_by_mask(verts: np.ndarray, faces: np.ndarray,
 def side_to_str(side: int) -> str:
     if not isinstance(side, int):
         raise ValueError(f'Side has wrong type ({type(side)})')
-    # TODO: The opposite in Matlab - error?
     if side == 1:
         ret = 'RIGHT'
     else:
@@ -1315,119 +1288,6 @@ def fit_cochlear_shape(verts, normals, max_iter, w_p, extended=False, verbose=Fa
         return fit_c, fit_c_bar, fit_gamma
 
 
-def generate_sample_curve(labyrinth_loc, fit_data, normalizer, centralizer):
-    RW = labyrinth_loc['landmarks']['RW']
-    vertices_loc_processed = labyrinth_loc['vertices_processed_unnormalized']
-
-    polar_slice_vec_one = fit_data['fit_c']
-    polar_slice_vec_two = RW - fit_data['P0']
-    polar_slice_normal = preprocessing.normalize(np.cross(polar_slice_vec_one, polar_slice_vec_two))
-
-    # Find basal turn cross section - generator curve
-    projected_generator_slice = np.sum(polar_slice_normal * vertices_loc_processed, axis=1)
-    vertices_close_to_plane = np.absolute(projected_generator_slice) < 4  # 3
-    vertices_close_to_RW = npl.norm(vertices_loc_processed - RW, axis=1) < 4  # 3
-
-    cross_section_norm = polar_slice_normal
-    cross_section_vertices = vertices_loc_processed[
-        np.logical_and(vertices_close_to_plane, vertices_close_to_RW)]
-    cross_section_delta = cross_section_vertices - RW
-    cross_section_proj = cross_section_vertices - ascol(
-        np.sum(cross_section_norm * cross_section_delta, axis=1)) * cross_section_norm
-
-    # does not work?
-    input_ = cross_section_proj[:, 0:2]
-    z_ellipse, a_ellipse, b_ellipse, alpha_ellipse = fitellipse(input_, opt='linear', tol=1e-3,
-                                                                maxits=200)
-
-    generator = np.concatenate(
-        (asrow(z_ellipse), np.mean(cross_section_proj[:, 2]).reshape((1, 1))), axis=1)
-    generator = (generator - centralizer) / normalizer
-
-    return generator
-
-
-# Generator Setting to Generate Shape
-# max_turns = 3*2*np.pi ~= 18.84955592153876
-def generate_shape(t, r, c, gamma, p_start, zero_vel_center, normalizer, centralizer, kin_A,
-                   max_iter=200000, velocity=0.01, max_turns=3 * 2 * np.pi):
-    r = np.array(r)
-    c = np.array(c)
-    gamma = np.array(gamma)
-    p_start = np.array(p_start)
-    zero_vel_center = np.array(zero_vel_center)
-    normalizer = np.array(normalizer)
-    centralizer = np.array(centralizer)
-    kin_A = np.array(kin_A)
-
-    # initialize
-    turn_nr = 0
-    arc_base = 0
-    curve = np.zeros((max_iter + 1, 3))
-    velocity_vector = np.zeros((max_iter, 3))
-    acceleration_vector = np.zeros((max_iter, 3))
-    jerk_vector = np.zeros((max_iter, 3))
-
-    curve[0, :] = p_start
-    generator_index = 0
-
-    while True:
-        velocity_vector[generator_index, :] = \
-            np.cross(np.cross(t, curve[generator_index, :]), curve[generator_index, :]) \
-            + np.cross(r, curve[generator_index, :]) \
-            + curve[generator_index, :] * gamma + c
-        acceleration_vector[generator_index, :] = \
-            - 2 * t * np.dot(velocity_vector[generator_index, :], curve[generator_index, :]) \
-            + velocity_vector[generator_index, :] * np.inner(curve[generator_index, :], t) \
-            + curve[generator_index, :] * np.inner(velocity_vector[generator_index, :], t) \
-            + np.cross(r, velocity_vector[generator_index, :]) \
-            + gamma * velocity_vector[generator_index, :]
-        jerk_vector[generator_index, :] = \
-            - 2 * t * np.dot(acceleration_vector[generator_index, :], curve[generator_index, :]) \
-            - 2 * t * np.dot(velocity_vector[generator_index, :],
-                             velocity_vector[generator_index, :]) \
-            + acceleration_vector[generator_index, :] * np.inner(curve[generator_index, :], t) \
-            + 2 * velocity_vector[generator_index, :] * np.inner(
-                velocity_vector[generator_index, :], t) \
-            + curve[generator_index, :] * np.inner(acceleration_vector[generator_index, :], t) \
-            + np.cross(r, acceleration_vector[generator_index, :]) \
-            + gamma * acceleration_vector[generator_index, :]
-        curve[generator_index + 1, :] = curve[generator_index, :] \
-                                        + velocity * velocity_vector[generator_index, :]
-
-        # Compute projected angle perpendicular to axis
-        vector_one = curve[generator_index, :] - (zero_vel_center - centralizer) / normalizer
-        vector_two = curve[generator_index + 1, :] - (zero_vel_center - centralizer) / normalizer
-        vector_one_proj = vector_one - kin_A * np.dot(kin_A, vector_one) / npl.norm(kin_A)
-        vector_two_proj = vector_two - kin_A * np.dot(kin_A, vector_two) / npl.norm(kin_A)
-        costheta = np.dot(vector_one_proj, vector_two_proj) / (
-                    npl.norm(vector_one_proj) * npl.norm(vector_two_proj))
-        if not -1 <= costheta <= 1:
-            raise ValueError(
-                f'Arccos arg out of range {costheta}, turn_nr {turn_nr}, idx {generator_index + 1}')
-        turn_nr = turn_nr + np.arccos(costheta)
-
-        if (turn_nr > max_turns) or (generator_index + 1 >= max_iter):
-            print(f'Break at turn_nr {turn_nr} and generator idx {generator_index + 1}')
-            break
-        generator_index = generator_index + 1
-
-    # adjust predefined length of arrays
-    curve = curve[0:generator_index + 2, :]
-    velocity_vector = velocity_vector[0:generator_index + 1, :]
-    acceleration_vector = acceleration_vector[0:generator_index + 1, :]
-    jerk_vector = jerk_vector[0:generator_index + 1, :]
-
-    curvature = npl.norm(np.cross(velocity_vector, acceleration_vector), axis=1) \
-                / npl.norm(velocity_vector, axis=1) ** 3
-    torsion = np.einsum('oi,oi->o', np.cross(velocity_vector, acceleration_vector), jerk_vector) \
-              / npl.norm(np.cross(velocity_vector, acceleration_vector), axis=1) ** 2
-    full_curve = curve * normalizer + centralizer
-    arc_length = arc_base + np.cumsum(npl.norm(np.diff(full_curve, axis=0), axis=1))
-
-    return curve, full_curve, curvature * normalizer, torsion * normalizer, arc_length
-
-
 def get_center_vzero(fit_c, fit_c_bar, fit_gamma):
     center_vzero = (np.cross(fit_gamma * fit_c, fit_c_bar) - fit_gamma ** 2 * fit_c_bar
                     - np.inner(fit_c, fit_c_bar) * fit_c) / (
@@ -1551,16 +1411,6 @@ def fitt_optnu(x, delta, p):
     f = -psi(nu2) + np.log(nu2) + (np.sum(np.log(w) - w) / len(delta)) + 1 + \
         psi(pnu2) - np.log(pnu2)
     return f
-
-
-def spsolve_helper(A, b):
-    """ Solve Ax = b using scipy spsolve and sparse matrices """
-    As = csc_matrix(A)
-    bs = csc_matrix(b)
-
-    ret = spsolve(As, bs)
-    ret = ret.toarray()
-    return ret
 
 
 def student_t_vectorized(x, nu=5, eps=1e-8, max_iter=500, verbose=False):
