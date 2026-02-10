@@ -2,6 +2,7 @@
 
 # custom ignores
 data/
+modax_settings.ini
 
 ### Python template
 # Byte-compiled / optimized / DLL files
