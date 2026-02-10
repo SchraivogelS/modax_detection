@@ -33,7 +33,7 @@ class CochlearMesh:
         self.spec_name = spec_name
         self.load_dicom = True
         self.smooth_mesh = False
-        self.mask_cochlea = False
+        self.mask_cochlea = True
         self.min_len_verts = 5000
         self.plot_surf = False  # takes up to 1 min for big volumes
         self.verbose = False

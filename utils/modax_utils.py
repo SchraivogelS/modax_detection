@@ -59,41 +59,19 @@ def init_specimen(spec_dir, spec_name):
     return specimen_data
 
 
-def create_bin_sphere(*, sphere_size, center, radius, show_sphere=False) -> np.ndarray:
-    Nx, Ny, Nz = sphere_size
-    Cx, Cy, Cz = center
-    R = radius
-    R_sq = R ** 2
+def create_bin_sphere(sphere_size, center_ijk, radius_mm, spacing, show_sphere=False):
+    # center_ijk: (ci, cj, ck)
+    # spacing: (si, sj, sk) matches the array axes
 
-    # 1. Calculate Bounding Box (BB) indices
-    # Determine the smallest box that contains the sphere, clamped to volume limits
-    i_start = max(0, int(Cx - R))
-    i_end = min(Nx, int(Cx + R + 1))
+    # Create coordinate grids for the whole volume (or just a bounding box)
+    # Using ogrid for memory efficiency
+    grid = np.ogrid[:sphere_size[0], :sphere_size[1], :sphere_size[2]]
 
-    j_start = max(0, int(Cy - R))
-    j_end = min(Ny, int(Cy + R + 1))
-
-    k_start = max(0, int(Cz - R))
-    k_end = min(Nz, int(Cz + R + 1))
-
-    # 2. Generate Local Coordinates only for the BB
-    # coords_local[0] is the I-axis array, coords_local[1] is J, coords_local[2] is K
-    coords_local = np.ogrid[i_start:i_end, j_start:j_end, k_start:k_end]
-
-    # 3. Calculate Local Squared Distance (Avoids slow np.sqrt and large float array)
-    distance_sq_local = (coords_local[0] - Cx) ** 2 + \
-                        (coords_local[1] - Cy) ** 2 + \
-                        (coords_local[2] - Cz) ** 2
-
-    # 4. Create Local Mask
-    sphere_bool_local = (distance_sq_local <= R_sq)
-
-    # 5. Embed Local Mask into the Global Mask
-    # Create the final, full-sized boolean array (initialized to False)
-    sphere_bool_global = np.full(sphere_size, False, dtype=bool)
-
-    # Insert the computed small mask into the correct region
-    sphere_bool_global[i_start:i_end, j_start:j_end, k_start:k_end] = sphere_bool_local
+    # Calculate physical distance squared: dist = sqrt( (di*si)^2 + (dj*sj)^2 + (dk*sk)^2 )
+    dist_sq = ((grid[0] - center_ijk[0]) * spacing[0]) ** 2 + \
+              ((grid[1] - center_ijk[1]) * spacing[1]) ** 2 + \
+              ((grid[2] - center_ijk[2]) * spacing[2]) ** 2
+    sphere_bool = dist_sq <= (radius_mm ** 2)
 
     if show_sphere:
         import scipy.ndimage as ndi
@@ -102,25 +80,24 @@ def create_bin_sphere(*, sphere_size, center, radius, show_sphere=False) -> np.n
         ax = plt.axes(projection='3d')
 
         # Erode the sphere (peel one layer off)
-        eroded_sphere = ndi.binary_erosion(sphere_bool_global)
+        eroded_sphere = ndi.binary_erosion(sphere_bool)
         # The surface is the original sphere MINUS the eroded version
-        surface_mask = sphere_bool_global & ~eroded_sphere
+        surface_mask = sphere_bool & ~eroded_sphere
 
         # Only plot surface points
         pos = np.where(surface_mask == True)
         ax.scatter(pos[0], pos[1], pos[2], color='k', alpha=0.4, s=1)
 
-        ax.scatter(center[0], center[1], center[2], color='r', s=50)
-        ax.text(center[0], center[1], center[2], "C", color='r',
-                horizontalalignment='center', verticalalignment='center',
+        ax.scatter(center_ijk[0], center_ijk[1], center_ijk[2], color='r', s=50)
+        ax.text(center_ijk[0], center_ijk[1], center_ijk[2], "C", color='r',
+                horizontalalignment='center_ijk', verticalalignment='center_ijk',
                 fontsize=30)
 
-        ax.set_xlim3d(center[0] - R, center[0] + R)
-        ax.set_ylim3d(center[1] - R, center[1] + R)
-        ax.set_zlim3d(center[2] - R, center[2] + R)
+        ax.set_xlim3d(center_ijk[0] - radius_mm, center_ijk[0] + radius_mm)
+        ax.set_ylim3d(center_ijk[1] - radius_mm, center_ijk[1] + radius_mm)
+        ax.set_zlim3d(center_ijk[2] - radius_mm, center_ijk[2] + radius_mm)
         plt.show(block=True)
-
-    return sphere_bool_global
+    return sphere_bool
 
 
 def smooth_laplacian(verts, faces):
@@ -242,7 +219,8 @@ def create_cochlear_sphere(spec_dir, spec_name, origin, spacing, vol_size):
     sphere_radius = r_vox.min()
 
     cochlear_sphere = create_bin_sphere(sphere_size=(vol_size[0], vol_size[1], vol_size[2]),
-                                        center=sphere_center_ijk, radius=sphere_radius)
+                                        center_ijk=sphere_center_ijk, radius_mm=sphere_radius,
+                                        spacing=spacing)
 
     return cochlear_sphere, sphere_center_ijk
 
