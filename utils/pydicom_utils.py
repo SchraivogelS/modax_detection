@@ -168,8 +168,7 @@ def load_dcm_from_path(dicom_path: str, filter_size: int = None, plot_hu=False,
 
     if not os.path.exists(dicom_path):
         logging.error(f'Directory {dicom_path} does not exist. Load from SURFace instead?')
-    ds = [dcmread(os.path.join(dicom_path, filename), force=force)
-          for filename in glob.glob(os.path.join(dicom_path, '*.dcm'))]
+    ds = [dcmread(filename, force=force) for filename in glob.glob(os.path.join(dicom_path, '*.dcm'))]
     if len(ds) == 0:
         raise ValueError(f'{dicom_path} misses DICOM files.')
 

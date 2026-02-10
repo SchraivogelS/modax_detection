@@ -33,7 +33,7 @@ class CochlearMesh:
         self.spec_name = spec_name
         self.load_dicom = True
         self.smooth_mesh = False
-        self.mask_cochlea = True
+        self.mask_cochlea = False
         self.min_len_verts = 5000
         self.plot_surf = False  # takes up to 1 min for big volumes
         self.verbose = False
@@ -53,7 +53,6 @@ class CochlearMesh:
         self._coord_sys = None
         self._side = ''
         self._spec_dir = self.get_spec_dir()
-        self._spec_data_dir = self.get_spec_data_dir()
         # load config
         config = configparser.ConfigParser()
         config.read(path_cfg)
@@ -157,10 +156,6 @@ class CochlearMesh:
         self._centralizer = centralizer
 
     @property
-    def spec_data_dir(self):
-        return self._spec_data_dir
-
-    @property
     def spec_dir(self):
         return self._spec_dir
 
@@ -169,12 +164,6 @@ class CochlearMesh:
         if not os.path.isdir(spec_dir):
             raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), spec_dir)
         return str(spec_dir)
-
-    def get_spec_data_dir(self):
-        spec_data_dir = os.path.join(self.get_spec_dir(), 'data')
-        if not os.path.isdir(spec_data_dir):
-            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), spec_data_dir)
-        return spec_data_dir
 
     def init(self):
         self.init_specimen()
@@ -211,8 +200,8 @@ class CochlearMesh:
                 verbose=self.verbose
             )
         else:
-            verts_transformed, faces_raw = modax_utils.mesh_from_surf(specimen_data, self.spec_data_dir,
-                                                          self.spec_name)
+            verts_transformed, faces_raw = modax_utils.mesh_from_surf(specimen_data, self.spec_dir,
+                                                                      self.spec_name)
 
         modax_utils.update_mesh_data(specimen_data, verts_transformed, faces_raw)
 

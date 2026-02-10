@@ -32,7 +32,6 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
 from collections import defaultdict
-from sklearn import preprocessing
 from typing import Tuple
 from copy import deepcopy
 
@@ -287,7 +286,7 @@ def transform_verts(verts_in, offset, spacing):
 
 
 def get_dicom_dir(spec_dir):
-    ret = os.path.join(spec_dir, 'data', 'preop')
+    ret = os.path.join(spec_dir, 'preop')
     return ret
 
 
@@ -1228,6 +1227,7 @@ def iterative_aml(verts, normals, max_iter, v_scaled, delta, w_p, extended, verb
         gamma_np = init_extended_spiral_field(verts, normals, gamma_np)
 
     # Robust fitting: estimate degree of freedom nu and confidence w
+    print(np.isnan(delta).any())
     mu, S, nu, w = student_t_vectorized(delta)
     z = np.array(w).transpose()
 
@@ -1352,6 +1352,21 @@ def arccos(val):
     return theta
 
 
+def normalize_l2(a):
+    # Scale input vectors to unit norm (vector length) by dividing with l2-norm
+    # https://github.com/scikit-learn/scikit-learn/blob/d3898d9d57aeb1e960d266613a2e31b07bca39d7/sklearn/preprocessing/_data.py#L1961
+    # 1. Calculate the L2 norm per row
+    # keepdims=True ensures the shape is (N, 1) instead of (N,) for proper broadcasting during division
+    norm = np.linalg.norm(a, axis=1, keepdims=True)
+
+    # 2. Avoid division by zero for zero-vectors
+    norm[norm == 0] = 1
+
+    # 3. Divide the original array by the norm
+    ret = a / norm
+    return ret
+
+
 def vertex_normals_from_mesh(verts, faces):
     """
     Loads an array of vertices (N x 3) and faces (N x 3)
@@ -1371,9 +1386,9 @@ def vertex_normals_from_mesh(verts, faces):
     e1 = verts[Fa, :] - verts[Fb, :]
     e2 = verts[Fb, :] - verts[Fc, :]
     e3 = verts[Fc, :] - verts[Fa, :]
-    e1_norm = preprocessing.normalize(e1)
-    e2_norm = preprocessing.normalize(e2)
-    e3_norm = preprocessing.normalize(e3)
+    e1_norm = normalize_l2(e1)
+    e2_norm = normalize_l2(e2)
+    e3_norm = normalize_l2(e3)
 
     edge_angle = np.zeros((len(e1), 3))
     # TODO: Correct if vertex normals point toward cochlear center instead of outside (minus sign for center)?
@@ -1393,7 +1408,7 @@ def vertex_normals_from_mesh(verts, faces):
                     face_normals[i, :] * edge_angle[i, 1])
         vertex_normals_scaled[Fc[i], :] = vertex_normals_scaled[Fc[i], :] + (
                     face_normals[i, :] * edge_angle[i, 2])
-    return preprocessing.normalize(vertex_normals_scaled)
+    return normalize_l2(vertex_normals_scaled)
 
 
 def fitt_optnu(x, delta, p):
@@ -1410,218 +1425,78 @@ def fitt_optnu(x, delta, p):
     return f
 
 
-# todo refactor
-def student_t_vectorized(x, nu=5, eps=1e-8, max_iter=500, verbose=False):
-    """
-    Fit a t-distribution using the ECME algorithm (Lui & Rubin, 1995)
-    Optimized and vectorized version using standard NumPy/SciPy functions.
-
-    C Liu and D B Rubin, (1995) "ML estimation of the t distribution using EM and
-    its extensions, ECM and ECME", Statistica Sinica, 5, pp19-39
-    http://www3.stat.sinica.edu.tw/statistica/oldpdf/A5n12.pdf
-
-    @param x: fit student_t to x (Expected shape: (N_trl, N_var) or (N_trl,) for 1D)
-    @param nu: DOF
-    @param eps: tolerance for entropy
-    @param max_iter:
-    @param verbose:
-    """
-    from scipy.optimize import fsolve
-    from scipy.special import gammaln, psi, beta  # 'math.pi' can be replaced by 'np.pi'
+def _calculate_mahalanobis(x_centered, S):
+    """Calculates squared Mahalanobis distance efficiently."""
     from scipy.linalg import solve_triangular
 
-    x = np.array(x, dtype=np.float64)
+    if S.shape == (1, 1):
+        return (x_centered ** 2 / S[0, 0]).flatten()
 
-    # --------------------------------------------------------------------------
-    # 1. Input Handling and Initialization (Vectorized)
-    # --------------------------------------------------------------------------
-    if x.ndim == 1:
-        # Standard case: N_trl observations of N_var=1 variable
-        x = x.reshape(-1, 1)  # Ensure x is (N_trl, 1)
+    L = np.linalg.cholesky(S)
+    # Solve L*y = x_centered.T -> y = L^-1 * x_centered.T
+    y = solve_triangular(L, x_centered.T, lower=True)
+    return np.sum(y ** 2, axis=0)
 
-    Ntrl, Nvar = x.shape
-    p = Nvar
 
-    # Handle the singular case (p=1, covariance S is a scalar)
-    is_scalar = (p == 1)
+def student_t_vectorized(x, nu=5, eps=1e-8, max_iter=500, verbose=False):
+    """
+    Fit a t-distribution using the ECME algorithm.
+    """
+    from scipy.optimize import fsolve
+    from scipy.special import gammaln, psi
+    # 1. Setup and Standardization
+    x = np.atleast_2d(np.array(x, dtype=np.float64))
+    if x.shape[0] < x.shape[1]:  # Assume rows are observations
+        x = x.T if x.shape[0] == 1 else x
 
-    if Ntrl == 0:
-        raise ValueError("Input array 'x' is empty (Ntrl=0). Cannot fit a t-distribution to empty data.")
+    n_samples, p = x.shape
+    mean = np.mean(x, axis=0)
+    S = np.cov(x, rowvar=False).reshape(p, p)
 
-    if Ntrl <= p:
-        # Ntrl <= p leads to a singular (non-invertible) covariance matrix S,
-        # which will cause cholesky to fail or produce NaNs.
-        # While technically possible for t-distribution fitting, it's ill-conditioned.
-        # We warn and proceed, but for Ntrl=0, we raise an error.
-        if verbose:
-            print(f"Warning: Ntrl ({Ntrl}) is not greater than Nvar ({Nvar}). Covariance matrix may be singular.")
+    h_current = 0.0
 
-    # Initial estimates
-    # Use ddof=1 for sample covariance/variance calculation
-    if is_scalar:
-        S = np.cov(x.flatten(), ddof=1)  # S is a scalar
-    else:
-        S = np.cov(x, rowvar=False, ddof=1)  # S is a p x p matrix if Ntrl>1, or a scalar/NaNs if Ntrl=1
+    for i in range(1, max_iter + 1):
+        h_old = h_current
 
-        # Check if np.cov returned a scalar (0-dim array) or a 1x1 array.
-        # If it's not a proper p x p matrix, we must switch to the univariate (p=1) logic.
-        if S.ndim < 2 or (S.ndim == 2 and S.shape != (p, p)):
-            # This occurs when Ntrl <= p. We cannot proceed with the multivariate fit.
-            # Force the problem to be treated as univariate (p=1) and S as the variance of the flattened array.
+        # --- E-Step ---
+        delta = _calculate_mahalanobis(x - mean, S)
+        weights = (p + nu) / (delta + nu)
+        w_sum = np.sum(weights)
 
-            # S becomes the variance of all values treated as a single distribution.
-            S = np.cov(x.flatten(), ddof=1)
+        # --- CM-1 Step: Update Mean and Covariance ---
+        mean = np.sum(x * weights[:, np.newaxis], axis=0) / w_sum
 
-            # Reset parameters to reflect univariate mode
-            is_scalar = True
-            p = 1
-            x = x.flatten().reshape(-1, 1)  # x becomes (N, 1) for consistent loop math
-            Ntrl, Nvar = x.shape  # Ntrl is now N, Nvar is 1
+        x_centered = x - mean
+        # Weighted outer product: (x.T * w) @ x / N
+        weighted_x = x_centered * np.sqrt(weights[:, np.newaxis])
+        S = (weighted_x.T @ weighted_x) / n_samples
 
-            if verbose:
-                print(f"Warning: Ntrl ({Ntrl}) was less than Nvar ({Nvar}). Forcing switch to univariate fit.")
-    mean = np.mean(x, axis=0)  # mean is (1, p) or (p,)
+        # --- CM-2 Step: Update Degrees of Freedom (nu) ---
+        if i % 2 == 0:
+            # Re-calculate delta for the CM-2 step
+            delta = _calculate_mahalanobis(x - mean, S)
 
-    H = 0.0
-    converged = False
-    i = 0
-
-    # Pre-calculate constants (Vectorized)
-    p2 = p / 2
-    # log_npip2 = np.log((nu * np.pi) ** p2 * beta(p2, nu / 2)) - gammaln(p2)
-    # Safe calculation using log-domain arithmetic
-    nu2 = nu / 2
-    nup2 = (nu + p) / 2
-    log_npip2 = p2 * np.log(nu * np.pi) + gammaln(nu2) - gammaln(nup2)
-
-    while (i < max_iter) and not converged:
-        H_old = H
-        i += 1
-
-        # ----------------------------------------------------------------------
-        # E step (Vectorized Mahalanobis Distance)
-        # ----------------------------------------------------------------------
-
-        # Calculate Cholesky decomposition L such that S = L L^T.
-        # The Mahalanobis distance delta = (x - mean) S^{-1} (x - mean)^T
-        # If S = L L^T, then S^{-1} = (L^T)^{-1} L^{-1}.
-        # di = x - mean. We need ||L^{-1} di^T||^2.
-
-        # Recalculate di here, as the CM-1 step updates mean and S
-        di = x - mean  # (Ntrl, p)
-
-        # Ensure cholesky is only called for matrices
-        if is_scalar:
-            # S is a scalar variance. L = sqrt(S).
-            chS_diag = np.sqrt(S)  # S is a scalar variance
-
-            # M = di / chS_diag (Vectorized)
-            M = di / chS_diag  # (Ntrl, 1)
-        else:
-            # S is a matrix. L = cholesky(S)
-            L = np.linalg.cholesky(S)  # L is lower-triangular
-
-            # Use solve_triangular (Vectorized)
-            M_T = solve_triangular(L, di.T, lower=True)
-            M = M_T.T  # (Ntrl, p)
-
-        # Mahalanobis distance delta = sum(M * M, axis=1) (Vectorized)
-        delta = np.sum(M * M, axis=1)  # (Ntrl,)
-
-        # Weights w (Vectorized)
-        w = (p + nu) / (delta + nu)  # (Ntrl,)
-
-        # ----------------------------------------------------------------------
-        # CM-1 Step (Vectorized Mean and Covariance)
-        # ----------------------------------------------------------------------
-
-        # New mean
-        mean = np.sum(x * w[:, np.newaxis], axis=0) / np.sum(w)  # (p,)
-
-        # New centered data di using updated mean
-        di = x - mean  # (Ntrl, p)
-
-        # New covariance S
-        # S = (di * w) * di.T / Ntrl
-        # S = (di.T @ (di * w[:, np.newaxis])) / Ntrl
-
-        # Since w is (Ntrl,), use broadcasting with np.newaxis to multiply
-        # diw is (Ntrl, p). Inner product np.inner(diw, diw) is for 1D arrays
-        # Use matrix multiplication for correct covariance matrix (Vectorized)
-        diw = di * np.sqrt(w[:, np.newaxis])  # (Ntrl, p)
-
-        if is_scalar:
-            # S remains a scalar (variance)
-            S = np.sum(diw * diw) / Ntrl  # Scalar
-        else:
-            # S remains a matrix (covariance)
-            S = (diw.T @ diw) / Ntrl  # (p, p)
-
-        # ----------------------------------------------------------------------
-        # CM-2 Step (Only every other iteration)
-        # ----------------------------------------------------------------------
-        if (i % 2) == 0:
-            # E step again (re-calculate w with new S)
-            if is_scalar:
-                chS_diag = np.sqrt(S)
-                M = di / chS_diag
-            else:
-                L = np.linalg.cholesky(S)
-                M_T = solve_triangular(L, di.T, lower=True)
-                M = M_T.T
-
-            delta = np.sum(M * M, axis=1)
-            w = (p + nu) / (delta + nu)
-
-            # Optimization for nu (Vectorized args for fsolve)
-            # You must define fitt_optnu outside this function!
-            # The args for fsolve are (delta, p)
-            sol, _, success, msg = fsolve(fitt_optnu, x0=nu, args=(delta, p),
-                                          xtol=1e-10, full_output=True)
-
+            nu_sol, _, success, msg = fsolve(
+                fitt_optnu, x0=nu, args=(delta, p), xtol=1e-10, full_output=True
+            )
             if not success:
-                raise Exception(f'minimize did not converge: {msg}')
-            nu = sol[0]
+                raise RuntimeError(f"nu optimization failed: {msg}")
+            nu = nu_sol[0]
 
-            # Convergence detection (Vectorized Entropy Calculation)
-            nu2 = nu / 2
-            nup2 = (nu + p) / 2
+            # --- Convergence Check (Entropy) ---
+            log_det_S = 2 * np.sum(np.log(np.diag(np.linalg.cholesky(S))))
+            log_const = (p / 2) * np.log(nu * np.pi) + gammaln(nu / 2) - gammaln((nu + p) / 2)
+            h_current = 0.5 * log_det_S + log_const + ((nu + p) / 2) * (psi((nu + p) / 2) - psi(nu / 2))
 
-            if is_scalar:
-                chS_log_det = np.log(np.sqrt(S))
-            else:
-                # Cholesky of S is L. log|chS| = log|L| = sum(log(diag(L)))
-                chS_log_det = np.sum(np.log(np.diag(L)))
-
-            # Entropy H (Vectorized)
-            H = chS_log_det + log_npip2 + nup2 * (psi(nup2) - psi(nu2))
-
-            converged = (np.abs(H - H_old) < eps)
-
+            diff = np.abs(h_current - h_old)
             if verbose:
-                print(f'Iteration {i}: nu={nu:.4f}, H={H:.4f}, |H-H_old|={np.abs(H - H_old):.2e}')
+                print(f"Iter {i}: nu={nu:.4f}, H={h_current:.4f}, diff={diff:.2e}")
 
-    if not converged:
-        raise Exception(f'fitt:ECME algorithm did not converge (MAXITER {max_iter} exceeded)')
-    if verbose:
-        print(f'ECME algorithm converged to {nu} after {i} iterations')
+            if diff < eps:
+                if verbose: print(f"Converged after {i} iterations.")
+                return mean, S.squeeze(), nu, weights
 
-    # Re-calculate final weights for output
-    if i % 2 != 0:
-        # If the loop stopped on an odd iteration, w needs to be re-calculated
-        di = x - mean
-        if is_scalar:
-            chS_diag = np.sqrt(S)
-            M = di / chS_diag
-        else:
-            L = np.linalg.cholesky(S)
-            M_T = solve_triangular(L, di.T, lower=True)
-            M = M_T.T
-
-        delta = np.sum(M * M, axis=1)
-        w = (p + nu) / (delta + nu)
-
-    return mean, S, nu, w.flatten()
+    raise TimeoutError("ECME failed to converge.")
 
 
 def transform_3D_point(point, hom_trans_mat) -> np.ndarray:

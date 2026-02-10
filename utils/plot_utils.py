@@ -9,12 +9,15 @@ Date: 26.07.2021
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+
 import plotly.express as px
 import plotly.graph_objects as go
 
 from plotly.offline import iplot
 from plotly import figure_factory as FF
 
+import plotly.io as pio
+pio.renderers.default = "browser"
 
 def get_annotation_dict(point, label):
     ret = dict(
@@ -217,7 +220,7 @@ def iplot_rotax_on_fig(rotax, center_vzero, fig):
     )
 
     fig.update_traces(showlegend=False)
-    iplot(fig)
+    fig.show()
     return fig
 
 
